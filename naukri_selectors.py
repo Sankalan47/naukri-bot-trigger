@@ -27,10 +27,10 @@ HEADLINE_TEXTAREA = "#resumeHeadlineTxt"
 HEADLINE_SAVE_BTN = "//div[contains(@class,'resumeHeadlineEdit')]//button[@type='submit']"
 
 # --- Profile summary / bio section ---
-BIO_SECTION       = ".profileSummary"
-BIO_EDIT_BTN      = "//div[contains(@class,'profileSummary')]//span[contains(@class,'edit') or @title='Edit']"
+BIO_SECTION       = ".widgetCont"
+BIO_EDIT_BTN      = "//span[contains(@class,'widgetTitle') and contains(normalize-space(),'rofile summary')]/following-sibling::span[contains(@class,'edit') and contains(@class,'icon')]"
 BIO_TEXTAREA      = "#profileSummaryTxt"
-BIO_SAVE_BTN      = "//div[contains(@class,'profileSummary')]//button[@type='submit']"
+BIO_SAVE_BTN      = "//button[normalize-space()='Save']"
 
 # --- Skills section ---
 SKILLS_EDIT_BTN      = "//div[contains(@class,'keySkillArea')]//span[contains(@class,'edit') or @title='Edit']"

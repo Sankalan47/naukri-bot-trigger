@@ -167,7 +167,6 @@ class NaukriBot:
             await self._take_debug_screenshot()
             raise NaukriSelectorError("Headline input field did not appear")
 
-        await self._page.triple_click(S.HEADLINE_TEXTAREA)
         await self._page.fill(S.HEADLINE_TEXTAREA, text)
         await self._click_save(S.HEADLINE_SAVE_BTN)
         return True
@@ -198,7 +197,6 @@ class NaukriBot:
             await self._take_debug_screenshot()
             raise NaukriSelectorError("Bio input field did not appear")
 
-        await self._page.triple_click(S.BIO_TEXTAREA)
         await self._page.fill(S.BIO_TEXTAREA, text)
         await self._click_save(S.BIO_SAVE_BTN)
         return True
