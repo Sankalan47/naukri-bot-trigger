@@ -1,0 +1,13 @@
+.env
+auth_state.json
+cookies.json
+debug_last_error.png
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.log
+test_local.py
+keys
+naukri-bot-context.md
