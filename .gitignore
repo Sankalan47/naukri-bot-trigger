@@ -11,3 +11,4 @@ venv/
 test_local.py
 keys
 naukri-bot-context.md
+bin/

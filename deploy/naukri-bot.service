@@ -1,0 +1,17 @@
+[Unit]
+Description=Naukri Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/sankalan/naukri-bot
+# Naukri's bot protection blocks headless Chromium (see HEADLESS in .env);
+# xvfb-run gives the headed browser a virtual display to run against.
+ExecStart=/usr/bin/xvfb-run -a /home/sankalan/naukri-bot/bin/naukri-bot-linux-arm
+Restart=always
+RestartSec=5
+User=sankalan
+
+[Install]
+WantedBy=multi-user.target
