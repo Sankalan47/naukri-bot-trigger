@@ -14,7 +14,6 @@ import (
 
 	"github.com/joho/godotenv"
 
-	"github.com/sankalan47/naukri-bot/internal/config"
 	"github.com/sankalan47/naukri-bot/internal/naukri"
 )
 
@@ -25,17 +24,14 @@ func main() {
 	addSkill := flag.String("add-skill", "", "call AddSkill with this skill and exit")
 	removeSkill := flag.String("remove-skill", "", "call RemoveSkill with this skill and exit")
 	touchBio := flag.Bool("touch-bio", false, "call TouchBio (toggle trailing full stop) and exit")
+	sessionDir := flag.String("session-dir", ".", "directory to load/save session files (auth_state.json, cookies.json, debug screenshot)")
 	flag.Parse()
 
 	if err := godotenv.Load(); err != nil {
 		log.Println("No .env file found, relying on environment variables")
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		log.Fatalf("config: %v", err)
-	}
 
-	client := naukri.NewClient(cfg.NaukriEmail, cfg.NaukriPassword)
+	client := naukri.NewClient(os.Getenv("NAUKRI_EMAIL"), os.Getenv("NAUKRI_PASSWORD"), *sessionDir)
 	if err := client.StartWithOptions(naukri.HeadedStartOptions()); err != nil {
 		log.Fatalf("starting naukri client: %v", err)
 	}

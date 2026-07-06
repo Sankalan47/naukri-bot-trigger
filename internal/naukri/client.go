@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -61,16 +62,20 @@ type StatusResult struct {
 	Reason      string
 }
 
-// Client is an automation wrapper around a single shared Playwright page for
-// all naukri.com profile interactions. All exported methods that touch the
-// page are serialized behind mu, since playwright-go (unlike Python's
-// single-threaded asyncio event loop) offers no implicit serialization
-// across concurrently-running goroutines.
-type Client struct {
-	mu sync.Mutex
+// browserMu serializes Naukri automation across every user's Client: only
+// one Chromium instance is ever alive at a time (see withBrowser), which is
+// what keeps this bot usable on a 1GB Raspberry Pi with multiple users.
+var browserMu sync.Mutex
 
-	email    string
-	password string
+// Client is an automation wrapper around a single Playwright page for one
+// user's naukri.com profile. Exported action methods run inside withBrowser,
+// which launches a fresh browser, loads this Client's session, runs the
+// action, persists session state, and closes the browser again — so the
+// browser only exists for the few seconds an action takes.
+type Client struct {
+	email      string
+	password   string
+	sessionDir string
 
 	pw      *playwright.Playwright
 	browser playwright.Browser
@@ -81,8 +86,64 @@ type Client struct {
 // NewClient creates a Client. email/password are used for the initial login
 // and for automatic re-login when a session expires; both may be empty if
 // only a saved session (auth_state.json/cookies.json) will ever be used.
-func NewClient(email, password string) *Client {
-	return &Client{email: email, password: password}
+// sessionDir holds this user's session files and is created if missing.
+func NewClient(email, password, sessionDir string) *Client {
+	if sessionDir == "" {
+		sessionDir = "."
+	}
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		log.Printf("creating session dir %s: %v", sessionDir, err)
+	}
+	return &Client{email: email, password: password, sessionDir: sessionDir}
+}
+
+func (c *Client) authStatePath() string {
+	return filepath.Join(c.sessionDir, authStateFile)
+}
+
+func (c *Client) cookiesPath() string {
+	return filepath.Join(c.sessionDir, cookiesFile)
+}
+
+func (c *Client) debugScreenshotPath() string {
+	return filepath.Join(c.sessionDir, debugScreenshot)
+}
+
+// withBrowser runs fn with a running browser available on c. If a browser is
+// already running (cmd/save-session's long-lived dev workflow, started via
+// Start/StartWithOptions), it's reused as-is and left running for the caller
+// to Stop() explicitly. Otherwise withBrowser launches one, serialized on the
+// package-level browserMu, and persists session state + closes it again once
+// fn returns.
+func (c *Client) withBrowser(fn func() error) error {
+	browserMu.Lock()
+	defer browserMu.Unlock()
+
+	if c.browser != nil {
+		return fn()
+	}
+
+	if err := c.start(defaultStartOptions()); err != nil {
+		return err
+	}
+	defer func() {
+		if err := c.persistSession(); err != nil {
+			log.Printf("persisting session: %v", err)
+		}
+		if err := c.Stop(); err != nil {
+			log.Printf("closing browser: %v", err)
+		}
+	}()
+
+	return fn()
+}
+
+// WaitIdle blocks until no Naukri browser action is in flight. Used during
+// shutdown so an in-flight action gets to persist its session and close its
+// browser before the process exits.
+func WaitIdle() {
+	browserMu.Lock()
+	browserMu.Unlock() //nolint:staticcheck // intentional lock/unlock to drain in-flight work
 }
 
 // Page and Context expose the underlying Playwright handles for dev tooling
@@ -131,12 +192,12 @@ func (c *Client) start(opts StartOptions) error {
 		UserAgent: playwright.String(opts.UserAgent),
 	}
 
-	hasAuthState := opts.LoadSession && fileExists(authStateFile)
-	hasCookies := opts.LoadSession && !hasAuthState && fileExists(cookiesFile)
+	hasAuthState := opts.LoadSession && fileExists(c.authStatePath())
+	hasCookies := opts.LoadSession && !hasAuthState && fileExists(c.cookiesPath())
 
 	if hasAuthState {
 		log.Println("Loading session from auth_state.json")
-		contextOpts.StorageStatePath = playwright.String(authStateFile)
+		contextOpts.StorageStatePath = playwright.String(c.authStatePath())
 	}
 
 	context, err := browser.NewContext(contextOpts)
@@ -147,7 +208,7 @@ func (c *Client) start(opts StartOptions) error {
 
 	if hasCookies {
 		log.Println("Loading session from cookies.json")
-		raw, err := os.ReadFile(cookiesFile)
+		raw, err := os.ReadFile(c.cookiesPath())
 		if err != nil {
 			return fmt.Errorf("reading cookies.json: %w", err)
 		}
@@ -183,7 +244,8 @@ func (c *Client) start(opts StartOptions) error {
 	return nil
 }
 
-// Stop gracefully closes the browser. Called on bot shutdown.
+// Stop closes the browser and resets c to a not-started state, so a
+// subsequent withBrowser call knows to launch a fresh one.
 func (c *Client) Stop() error {
 	var errs []error
 	if c.browser != nil {
@@ -196,19 +258,18 @@ func (c *Client) Stop() error {
 			errs = append(errs, fmt.Errorf("stopping playwright: %w", err))
 		}
 	}
+	c.pw, c.browser, c.context, c.page = nil, nil, nil, nil
 	return errors.Join(errs...)
 }
 
 // Login logs in with email + password. Saves auth_state.json on success.
 func (c *Client) Login() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.loginLocked()
+	return c.withBrowser(c.loginLocked)
 }
 
-// loginLocked assumes c.mu is already held. Only call this from within
-// another already-locked exported method (e.g. ensureLoggedIn); calling
-// Login() itself would deadlock since sync.Mutex is not reentrant.
+// loginLocked assumes a browser is already running (withBrowser guarantees
+// this). Only call this directly from within another exported method (e.g.
+// ensureLoggedIn) that's already running inside withBrowser.
 func (c *Client) loginLocked() error {
 	if c.email == "" || c.password == "" {
 		return newAuthError("NAUKRI_EMAIL or NAUKRI_PASSWORD not set in .env")
@@ -247,7 +308,7 @@ func (c *Client) loginLocked() error {
 	}
 
 	c.closePopups()
-	if err := c.saveSession(); err != nil {
+	if err := c.persistSession(); err != nil {
 		return err
 	}
 	log.Println("Login successful; session saved to auth_state.json")
@@ -255,11 +316,20 @@ func (c *Client) loginLocked() error {
 }
 
 // CheckStatus reports session health. It never returns an error — any
-// failure is reported via StatusResult.Reason.
+// failure (including one launching the browser) is reported via
+// StatusResult.Reason.
 func (c *Client) CheckStatus() StatusResult {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	var result StatusResult
+	if err := c.withBrowser(func() error {
+		result = c.checkStatus()
+		return nil
+	}); err != nil {
+		return StatusResult{Reason: err.Error()}
+	}
+	return result
+}
 
+func (c *Client) checkStatus() StatusResult {
 	if _, err := c.page.Goto(profileURL, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(20_000),
@@ -297,83 +367,80 @@ func (c *Client) CheckStatus() StatusResult {
 
 // UpdateHeadline updates the profile headline.
 func (c *Client) UpdateHeadline(text string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.withBrowser(func() error {
+		if err := c.ensureLoggedIn(); err != nil {
+			return err
+		}
 
-	if err := c.ensureLoggedIn(); err != nil {
-		return err
-	}
+		if _, err := c.page.WaitForSelector(headlineEditBtn, playwright.PageWaitForSelectorOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(10_000),
+		}); err != nil {
+			c.takeDebugScreenshot()
+			return newSelectorError("Could not find headline edit button — Naukri UI may have changed")
+		}
+		if err := c.page.Click(headlineEditBtn); err != nil {
+			return fmt.Errorf("clicking headline edit button: %w", err)
+		}
 
-	if _, err := c.page.WaitForSelector(headlineEditBtn, playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(10_000),
-	}); err != nil {
-		c.takeDebugScreenshot()
-		return newSelectorError("Could not find headline edit button — Naukri UI may have changed")
-	}
-	if err := c.page.Click(headlineEditBtn); err != nil {
-		return fmt.Errorf("clicking headline edit button: %w", err)
-	}
+		if _, err := c.page.WaitForSelector(headlineTextarea, playwright.PageWaitForSelectorOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(8_000),
+		}); err != nil {
+			c.takeDebugScreenshot()
+			return newSelectorError("Headline input field did not appear")
+		}
+		if err := c.page.Fill(headlineTextarea, text); err != nil {
+			return fmt.Errorf("filling headline textarea: %w", err)
+		}
 
-	if _, err := c.page.WaitForSelector(headlineTextarea, playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(8_000),
-	}); err != nil {
-		c.takeDebugScreenshot()
-		return newSelectorError("Headline input field did not appear")
-	}
-	if err := c.page.Fill(headlineTextarea, text); err != nil {
-		return fmt.Errorf("filling headline textarea: %w", err)
-	}
-
-	return c.clickSave(headlineSaveBtn)
+		return c.clickSave(headlineSaveBtn)
+	})
 }
 
 // UpdateBio updates the profile summary / bio.
 func (c *Client) UpdateBio(text string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.withBrowser(func() error {
+		if err := c.ensureLoggedIn(); err != nil {
+			return err
+		}
+		if err := c.openBioEditor(); err != nil {
+			return err
+		}
+		if err := c.page.Fill(bioTextarea, text); err != nil {
+			return fmt.Errorf("filling bio textarea: %w", err)
+		}
 
-	if err := c.ensureLoggedIn(); err != nil {
-		return err
-	}
-	if err := c.openBioEditor(); err != nil {
-		return err
-	}
-	if err := c.page.Fill(bioTextarea, text); err != nil {
-		return fmt.Errorf("filling bio textarea: %w", err)
-	}
-
-	return c.clickSave(bioSaveBtn)
+		return c.clickSave(bioSaveBtn)
+	})
 }
 
 // TouchBio makes a trivial, idempotent-safe edit to the bio (toggling a
 // trailing full stop) so Naukri registers the profile as recently updated,
 // without requiring a manual edit via Telegram.
 func (c *Client) TouchBio() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.withBrowser(func() error {
+		if err := c.ensureLoggedIn(); err != nil {
+			return err
+		}
+		if err := c.openBioEditor(); err != nil {
+			return err
+		}
 
-	if err := c.ensureLoggedIn(); err != nil {
-		return err
-	}
-	if err := c.openBioEditor(); err != nil {
-		return err
-	}
+		current, err := c.page.InputValue(bioTextarea)
+		if err != nil {
+			return fmt.Errorf("reading current bio text: %w", err)
+		}
+		if err := c.page.Fill(bioTextarea, toggleTrailingFullStop(current)); err != nil {
+			return fmt.Errorf("filling bio textarea: %w", err)
+		}
 
-	current, err := c.page.InputValue(bioTextarea)
-	if err != nil {
-		return fmt.Errorf("reading current bio text: %w", err)
-	}
-	if err := c.page.Fill(bioTextarea, toggleTrailingFullStop(current)); err != nil {
-		return fmt.Errorf("filling bio textarea: %w", err)
-	}
-
-	return c.clickSave(bioSaveBtn)
+		return c.clickSave(bioSaveBtn)
+	})
 }
 
 // openBioEditor scrolls the bio section into view, clicks its edit button,
-// and waits for the textarea to appear. Assumes c.mu is already held.
+// and waits for the textarea to appear. Assumes a browser is already running.
 func (c *Client) openBioEditor() error {
 	// Best-effort scroll so the edit button is in view; failure is not fatal.
 	_ = c.page.Locator(bioSection).ScrollIntoViewIfNeeded()
@@ -401,102 +468,106 @@ func (c *Client) openBioEditor() error {
 
 // AddSkill adds a skill to the skills section. Returns false if already present.
 func (c *Client) AddSkill(skill string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if err := c.ensureLoggedIn(); err != nil {
-		return false, err
-	}
-	if err := c.openSkillsEditor(); err != nil {
-		return false, err
-	}
-
-	existingCount, err := c.page.Locator(skillsChip(skill)).Count()
-	if err != nil {
-		return false, fmt.Errorf("counting existing skill chip: %w", err)
-	}
-	if existingCount > 0 {
-		return false, nil // already exists
-	}
-
-	if err := c.page.Click(skillsInput); err != nil {
-		return false, fmt.Errorf("clicking skills input: %w", err)
-	}
-	if err := c.page.Type(skillsInput, skill, playwright.PageTypeOptions{Delay: playwright.Float(80)}); err != nil {
-		return false, fmt.Errorf("typing skill: %w", err)
-	}
-
-	dropdownSel := skillsDropdownItem(skill)
-	if _, err := c.page.WaitForSelector(dropdownSel, playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5_000),
-	}); err != nil {
-		// No autocomplete match — try pressing Enter for free-text entry.
-		if err := c.page.Keyboard().Press("Enter"); err != nil {
-			return false, fmt.Errorf("pressing Enter for free-text skill entry: %w", err)
+	var added bool
+	err := c.withBrowser(func() error {
+		if err := c.ensureLoggedIn(); err != nil {
+			return err
 		}
-		time.Sleep(300 * time.Millisecond)
+		if err := c.openSkillsEditor(); err != nil {
+			return err
+		}
 
-		count, err := c.page.Locator(skillsChip(skill)).Count()
+		existingCount, err := c.page.Locator(skillsChip(skill)).Count()
 		if err != nil {
-			return false, fmt.Errorf("checking skill chip after free-text entry: %w", err)
+			return fmt.Errorf("counting existing skill chip: %w", err)
 		}
-		if count == 0 {
-			return false, newSelectorError(
-				"Skill '%s' not recognized by Naukri autocomplete. Try a slightly different name.", skill,
-			)
+		if existingCount > 0 {
+			return nil // already exists
 		}
-	} else if err := c.page.Click(dropdownSel); err != nil {
-		return false, fmt.Errorf("clicking autocomplete suggestion: %w", err)
-	}
 
-	if err := c.clickSave(skillsSaveBtn); err != nil {
-		return false, err
-	}
-	return true, nil
+		if err := c.page.Click(skillsInput); err != nil {
+			return fmt.Errorf("clicking skills input: %w", err)
+		}
+		if err := c.page.Type(skillsInput, skill, playwright.PageTypeOptions{Delay: playwright.Float(80)}); err != nil {
+			return fmt.Errorf("typing skill: %w", err)
+		}
+
+		dropdownSel := skillsDropdownItem(skill)
+		if _, err := c.page.WaitForSelector(dropdownSel, playwright.PageWaitForSelectorOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(5_000),
+		}); err != nil {
+			// No autocomplete match — try pressing Enter for free-text entry.
+			if err := c.page.Keyboard().Press("Enter"); err != nil {
+				return fmt.Errorf("pressing Enter for free-text skill entry: %w", err)
+			}
+			time.Sleep(300 * time.Millisecond)
+
+			count, err := c.page.Locator(skillsChip(skill)).Count()
+			if err != nil {
+				return fmt.Errorf("checking skill chip after free-text entry: %w", err)
+			}
+			if count == 0 {
+				return newSelectorError(
+					"Skill '%s' not recognized by Naukri autocomplete. Try a slightly different name.", skill,
+				)
+			}
+		} else if err := c.page.Click(dropdownSel); err != nil {
+			return fmt.Errorf("clicking autocomplete suggestion: %w", err)
+		}
+
+		if err := c.clickSave(skillsSaveBtn); err != nil {
+			return err
+		}
+		added = true
+		return nil
+	})
+	return added, err
 }
 
 // RemoveSkill removes a skill from the skills section. Returns false if not found.
 func (c *Client) RemoveSkill(skill string) (bool, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	var removed bool
+	err := c.withBrowser(func() error {
+		if err := c.ensureLoggedIn(); err != nil {
+			return err
+		}
+		if err := c.openSkillsEditor(); err != nil {
+			return err
+		}
 
-	if err := c.ensureLoggedIn(); err != nil {
-		return false, err
-	}
-	if err := c.openSkillsEditor(); err != nil {
-		return false, err
-	}
+		existingCount, err := c.page.Locator(skillsChip(skill)).Count()
+		if err != nil {
+			return fmt.Errorf("counting existing skill chip: %w", err)
+		}
+		if existingCount == 0 {
+			return nil // not present
+		}
 
-	existingCount, err := c.page.Locator(skillsChip(skill)).Count()
-	if err != nil {
-		return false, fmt.Errorf("counting existing skill chip: %w", err)
-	}
-	if existingCount == 0 {
-		return false, nil // not present
-	}
+		deleteSel := skillsChipDelete(skill)
+		if _, err := c.page.WaitForSelector(deleteSel, playwright.PageWaitForSelectorOptions{
+			State:   playwright.WaitForSelectorStateVisible,
+			Timeout: playwright.Float(5_000),
+		}); err != nil {
+			c.takeDebugScreenshot()
+			return newSelectorError("Could not find delete button for skill '%s'", skill)
+		}
+		if err := c.page.Click(deleteSel); err != nil {
+			return fmt.Errorf("clicking skill delete button: %w", err)
+		}
+		time.Sleep(300 * time.Millisecond)
 
-	deleteSel := skillsChipDelete(skill)
-	if _, err := c.page.WaitForSelector(deleteSel, playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(5_000),
-	}); err != nil {
-		c.takeDebugScreenshot()
-		return false, newSelectorError("Could not find delete button for skill '%s'", skill)
-	}
-	if err := c.page.Click(deleteSel); err != nil {
-		return false, fmt.Errorf("clicking skill delete button: %w", err)
-	}
-	time.Sleep(300 * time.Millisecond)
-
-	if err := c.clickSave(skillsSaveBtn); err != nil {
-		return false, err
-	}
-	return true, nil
+		if err := c.clickSave(skillsSaveBtn); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	return removed, err
 }
 
 // ensureLoggedIn navigates to the profile page, re-logging in if the
-// session has expired. Assumes c.mu is already held by the caller.
+// session has expired. Assumes a browser is already running.
 func (c *Client) ensureLoggedIn() error {
 	if _, err := c.page.Goto(profileURL, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
@@ -578,9 +649,9 @@ func (c *Client) closePopups() {
 	}
 }
 
-func (c *Client) saveSession() error {
+func (c *Client) persistSession() error {
 	if _, err := c.context.StorageState(playwright.BrowserContextStorageStateOptions{
-		Path: playwright.String(authStateFile),
+		Path: playwright.String(c.authStatePath()),
 	}); err != nil {
 		return fmt.Errorf("saving session: %w", err)
 	}
@@ -590,7 +661,7 @@ func (c *Client) saveSession() error {
 
 func (c *Client) takeDebugScreenshot() {
 	if _, err := c.page.Screenshot(playwright.PageScreenshotOptions{
-		Path:     playwright.String(debugScreenshot),
+		Path:     playwright.String(c.debugScreenshotPath()),
 		FullPage: playwright.Bool(true),
 	}); err != nil {
 		log.Printf("failed to save debug screenshot: %v", err)

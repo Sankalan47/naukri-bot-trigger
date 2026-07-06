@@ -1,4 +1,6 @@
 .env
+users.json
+sessions/
 auth_state.json
 cookies.json
 debug_last_error.png

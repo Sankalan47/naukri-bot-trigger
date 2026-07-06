@@ -1,44 +1,82 @@
-// Package config loads and validates environment variables shared by the
-// bot and dev tooling, matching the .env-based setup used by the Python
-// version (TELEGRAM_BOT_TOKEN, ALLOWED_USER_ID, NAUKRI_EMAIL, NAUKRI_PASSWORD).
+// Package config loads and validates the process-wide environment variables
+// (TELEGRAM_BOT_TOKEN, HEADLESS, CHROMIUM_PATH, PLAYWRIGHT_NODEJS_PATH,
+// USERS_FILE) plus the per-user Naukri accounts listed in users.json.
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 )
 
-type Config struct {
-	TelegramBotToken string
-	AllowedUserID    int64
-	NaukriEmail      string
-	NaukriPassword   string
+// UserConfig is one Telegram user's Naukri account, as configured manually by
+// the maintainer in users.json.
+type UserConfig struct {
+	TelegramUserID int64  `json:"telegram_user_id"`
+	NaukriEmail    string `json:"naukri_email"`
+	NaukriPassword string `json:"naukri_password"`
+	// SessionDir holds this user's auth_state.json/cookies.json/debug
+	// screenshot. Defaults to sessions/<telegram_user_id> when empty.
+	SessionDir string `json:"session_dir"`
 }
 
-// Load reads required and optional environment variables into a Config.
-// TELEGRAM_BOT_TOKEN and ALLOWED_USER_ID are required and fail fast if
-// missing, matching Python's os.environ["X"] KeyError behavior.
-// NAUKRI_EMAIL/NAUKRI_PASSWORD remain optional, as in the Python os.environ.get(...) calls.
+type Config struct {
+	TelegramBotToken string
+	Users            []UserConfig
+}
+
+// Load reads TELEGRAM_BOT_TOKEN from the environment and the per-user roster
+// from the file named by USERS_FILE (default users.json).
 func Load() (*Config, error) {
 	token, ok := os.LookupEnv("TELEGRAM_BOT_TOKEN")
 	if !ok || token == "" {
 		return nil, fmt.Errorf("TELEGRAM_BOT_TOKEN not set")
 	}
 
-	rawUserID, ok := os.LookupEnv("ALLOWED_USER_ID")
-	if !ok || rawUserID == "" {
-		return nil, fmt.Errorf("ALLOWED_USER_ID not set")
-	}
-	userID, err := strconv.ParseInt(rawUserID, 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("ALLOWED_USER_ID must be an integer: %w", err)
+	usersFile := os.Getenv("USERS_FILE")
+	if usersFile == "" {
+		usersFile = "users.json"
 	}
 
-	return &Config{
-		TelegramBotToken: token,
-		AllowedUserID:    userID,
-		NaukriEmail:      os.Getenv("NAUKRI_EMAIL"),
-		NaukriPassword:   os.Getenv("NAUKRI_PASSWORD"),
-	}, nil
+	users, err := loadUsers(usersFile)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Config{TelegramBotToken: token, Users: users}, nil
+}
+
+func loadUsers(path string) ([]UserConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+
+	var users []UserConfig
+	if err := json.Unmarshal(raw, &users); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	if len(users) == 0 {
+		return nil, fmt.Errorf("%s must list at least one user", path)
+	}
+
+	seenID := make(map[int64]bool, len(users))
+	seenDir := make(map[string]bool, len(users))
+	for i := range users {
+		u := &users[i]
+		if u.SessionDir == "" {
+			u.SessionDir = filepath.Join("sessions", strconv.FormatInt(u.TelegramUserID, 10))
+		}
+		if seenID[u.TelegramUserID] {
+			return nil, fmt.Errorf("%s: duplicate telegram_user_id %d", path, u.TelegramUserID)
+		}
+		seenID[u.TelegramUserID] = true
+		if seenDir[u.SessionDir] {
+			return nil, fmt.Errorf("%s: duplicate session_dir %q", path, u.SessionDir)
+		}
+		seenDir[u.SessionDir] = true
+	}
+	return users, nil
 }

@@ -16,14 +16,13 @@ import (
 )
 
 type Bot struct {
-	api           *tgbotapi.BotAPI
-	naukri        *naukri.Client
-	allowedUserID int64
-	conv          *Manager
+	api      *tgbotapi.BotAPI
+	sessions map[int64]*naukri.Client // keyed by Telegram user ID
+	conv     *Manager
 }
 
-func New(api *tgbotapi.BotAPI, naukriClient *naukri.Client, allowedUserID int64) *Bot {
-	b := &Bot{api: api, naukri: naukriClient, allowedUserID: allowedUserID}
+func New(api *tgbotapi.BotAPI, sessions map[int64]*naukri.Client) *Bot {
+	b := &Bot{api: api, sessions: sessions}
 	b.conv = newManager(b.onConversationTimeout)
 	return b
 }
@@ -60,14 +59,18 @@ func (b *Bot) Stop() {
 
 func (b *Bot) dispatch(update tgbotapi.Update) {
 	msg := update.Message
-	if msg == nil || msg.From == nil || msg.From.ID != b.allowedUserID {
-		return // silently ignore updates from anyone but the whitelisted user
+	if msg == nil || msg.From == nil {
+		return
+	}
+	client, ok := b.sessions[msg.From.ID]
+	if !ok {
+		return // silently ignore updates from anyone not in users.json
 	}
 	chatID := msg.Chat.ID
 
 	if !msg.IsCommand() {
 		if kind, ok := b.conv.Get(chatID); ok {
-			b.handleConversationText(chatID, kind, msg.Text)
+			b.handleConversationText(chatID, client, kind, msg.Text)
 		}
 		return
 	}
@@ -80,7 +83,7 @@ func (b *Bot) dispatch(update tgbotapi.Update) {
 	case "start":
 		b.cmdStart(chatID)
 	case "status":
-		b.cmdStatus(chatID)
+		b.cmdStatus(chatID, client)
 	case "refresh_session":
 		b.cmdRefreshSession(chatID)
 	case "cancel":
@@ -96,7 +99,7 @@ func (b *Bot) dispatch(update tgbotapi.Update) {
 	}
 }
 
-func (b *Bot) handleConversationText(chatID int64, kind ConvKind, text string) {
+func (b *Bot) handleConversationText(chatID int64, client *naukri.Client, kind ConvKind, text string) {
 	trimmed := strings.TrimSpace(text)
 
 	if trimmed == "" {
@@ -108,13 +111,13 @@ func (b *Bot) handleConversationText(chatID int64, kind ConvKind, text string) {
 	b.conv.Clear(chatID)
 	switch kind {
 	case AwaitBio:
-		b.receiveBio(chatID, trimmed)
+		b.receiveBio(chatID, client, trimmed)
 	case AwaitHeadline:
-		b.receiveHeadline(chatID, trimmed)
+		b.receiveHeadline(chatID, client, trimmed)
 	case AwaitSkillAdd:
-		b.receiveAddSkill(chatID, trimmed)
+		b.receiveAddSkill(chatID, client, trimmed)
 	case AwaitSkillRemove:
-		b.receiveRemoveSkill(chatID, trimmed)
+		b.receiveRemoveSkill(chatID, client, trimmed)
 	}
 }
 

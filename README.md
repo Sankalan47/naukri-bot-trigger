@@ -1,6 +1,6 @@
 # Naukri Bot
 
-A Telegram bot that remotely updates your Naukri.com profile (bio, headline, skills) via browser automation — trigger it from your phone, it runs 24/7 on a small home/cloud server.
+A Telegram bot that remotely updates your Naukri.com profile (bio, headline, skills) via browser automation — trigger it from your phone, it runs 24/7 on a small home/cloud server. Supports multiple users, each against their own Naukri account.
 
 ## Why
 
@@ -42,7 +42,9 @@ There's also a background job: `internal/scheduler` fires a trivial bio "touch" 
 naukri-bot/
 ├── go.mod / go.sum
 ├── Makefile                          # build, build-linux-arm64, build-linux-arm, install-browsers, test, run, run-save-session
-├── .env                               # secrets (gitignored)
+├── .env                               # process-wide secrets (gitignored)
+├── users.json                         # per-user Naukri accounts (gitignored, see users.json.example)
+├── sessions/                          # per-user session files, one dir per Telegram user ID (gitignored)
 ├── deploy/
 │   └── naukri-bot.service             # systemd unit
 ├── cmd/
@@ -51,39 +53,42 @@ naukri-bot/
 │   └── install-driver/main.go         # fetches the Playwright driver only (for 32-bit ARM targets)
 └── internal/
     ├── config/
-    │   └── config.go                  # env loading + validation
+    │   └── config.go                  # env + users.json loading and validation
     ├── naukri/
     │   ├── client.go                  # Client: Start/Stop/Login/CheckStatus/UpdateHeadline/UpdateBio/AddSkill/RemoveSkill
     │   ├── selectors.go                # Naukri DOM selectors (update when Naukri ships a new frontend)
     │   ├── text.go                     # pure text helpers (e.g. bio-toggle logic)
     │   └── errors.go                   # Error type + ErrorKind enum (Auth/SessionExpired/Selector/Timeout)
     ├── scheduler/
-    │   └── scheduler.go                 # daily scheduled bio-touch job
+    │   └── scheduler.go                 # daily scheduled per-user bio-touch jobs
     └── telegram/
-        ├── bot.go                       # update loop, dispatch, lifecycle
+        ├── bot.go                       # update loop, per-user dispatch, lifecycle
         ├── handlers.go                  # /start, /status, /refresh_session, /cancel, conversation entry points
         ├── conversation.go              # per-chat state machine, 120s timeout
         └── errors.go                    # naukri.Error → Telegram-facing copy
 ```
 
-`auth_state.json` and `cookies.json` (both gitignored) hold the saved Naukri session.
+Each user's `auth_state.json`/`cookies.json` (gitignored) live under `sessions/<telegram_user_id>/` and hold that user's saved Naukri session.
 
 ## Getting started
 
-**Prerequisites:** Go 1.23+, a Naukri.com account, and a Telegram bot token from [@BotFather](https://t.me/botfather).
+**Prerequisites:** Go 1.23+, one Naukri.com account per user, and a Telegram bot token from [@BotFather](https://t.me/botfather).
 
 ```bash
 git clone <this-repo>
 cd naukri-bot
-cp .env.example .env   # fill in your values, see Configuration below
+cp .env.example .env             # fill in TELEGRAM_BOT_TOKEN, see Configuration below
+cp users.json.example users.json # add one entry per Telegram user + their Naukri account
 make build
-make install-browsers  # downloads the Playwright driver + Chromium
+make install-browsers            # downloads the Playwright driver + Chromium
 ```
 
-Bootstrap a Naukri session before the bot can act on your behalf — either:
+Onboarding a new user is manual: add their `telegram_user_id`/`naukri_email`/`naukri_password` to `users.json` and redeploy — there's no self-service `/register` flow.
 
-- **Password login** (recommended): set `NAUKRI_EMAIL`/`NAUKRI_PASSWORD` in `.env`; the bot logs in automatically and re-logs in when the session expires.
-- **Cookie session** (fallback): run `./bin/save-session --save-cookies`, log in manually in the browser window that opens. This saves `cookies.json`, which is loaded on every future run. It expires after ~30 days, at which point you repeat this step (or use `/refresh_session`).
+Bootstrap each user's Naukri session before the bot can act on their behalf — either:
+
+- **Password login** (recommended): set that user's `naukri_email`/`naukri_password` in `users.json`; the bot logs in automatically and re-logs in when the session expires.
+- **Cookie session** (fallback): run `./bin/save-session --save-cookies --session-dir sessions/<their_telegram_user_id>`, log in manually in the browser window that opens. This saves that user's `cookies.json`, loaded on every future run. It expires after ~30 days, at which point you repeat this step (or use `/refresh_session`).
 
 Then run the bot:
 
@@ -91,21 +96,30 @@ Then run the bot:
 make run
 ```
 
-Message your bot on Telegram with `/start` to confirm it's alive.
+Message your bot on Telegram with `/start` (from each configured user's account) to confirm it's alive.
 
 ## Configuration
 
-Environment variables, read via `internal/config/config.go`:
+Process-wide environment variables, read via `internal/config/config.go`:
 
 | Variable | Required | Purpose |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Yes | From BotFather; process fails fast at startup if missing |
-| `ALLOWED_USER_ID` | Yes | Your Telegram user ID (from [@userinfobot](https://t.me/userinfobot)); the bot silently ignores everyone else |
-| `NAUKRI_EMAIL` / `NAUKRI_PASSWORD` | No | Enables automatic re-login when the session expires |
+| `USERS_FILE` | No | Path to the per-user roster (default `users.json`) |
 | `PLAYWRIGHT_NODEJS_PATH` / `CHROMIUM_PATH` | No | Point at apt-installed system Node/Chromium — needed on 32-bit ARM (e.g. Raspberry Pi 3B), where Playwright has no prebuilt binaries |
 | `HEADLESS` | No | Set to `false` to run a headed browser (see Deployment — required on Naukri due to bot detection on some setups) |
 
 See `.env.example` for the full template.
+
+Per-user Naukri accounts live in `users.json` (gitignored — see `users.json.example`), a JSON array of:
+
+| Field | Required | Purpose |
+|---|---|---|
+| `telegram_user_id` | Yes | That user's Telegram ID (from [@userinfobot](https://t.me/userinfobot)); the bot silently ignores messages from anyone not listed |
+| `naukri_email` / `naukri_password` | No | Enables automatic (re-)login when that user's session expires |
+| `session_dir` | No | Where that user's `auth_state.json`/`cookies.json`/debug screenshot live (default `sessions/<telegram_user_id>`) |
+
+`telegram_user_id` and the resolved `session_dir` must each be unique across the file; the process fails fast at startup otherwise.
 
 ## Development
 
@@ -124,8 +138,9 @@ make run-save-session    # build + run the dev tool (headed browser)
 | `--add-skill "name"` | Call `AddSkill` with this skill and exit |
 | `--remove-skill "name"` | Call `RemoveSkill` with this skill and exit |
 | `--touch-bio` | Call `TouchBio` (toggle trailing full stop) and exit |
+| `--session-dir <dir>` | Directory to load/save session files (default `.`) — point it at `sessions/<telegram_user_id>` to debug a specific user's session |
 
-Use this to validate selectors and behavior against the live site before trusting a scheduled or Telegram-triggered run.
+`save-session` reads `NAUKRI_EMAIL`/`NAUKRI_PASSWORD` directly from the environment/`.env`, independent of `users.json`. Use this to validate selectors and behavior against the live site before trusting a scheduled or Telegram-triggered run.
 
 ## Deployment
 
@@ -151,8 +166,8 @@ journalctl -u naukri-bot -f   # tail logs
 
 - **Sessions expire** after ~30 days; `/status` detects this early, `/refresh_session` explains how to renew.
 - **Selectors may break** if Naukri changes its frontend — all selectors live in `internal/naukri/selectors.go`; validate with `playwright codegen https://www.naukri.com/mnjuser/profile`.
-- **Single-user only** — the bot only responds to the whitelisted `ALLOWED_USER_ID`.
-- **Single shared browser page** — all Naukri actions serialize behind a mutex on the one `naukri.Client`; concurrent Telegram commands queue rather than corrupt browser state, but Telegram itself stays responsive.
+- **Manual onboarding only** — the bot only responds to Telegram users listed in `users.json`; adding someone requires editing that file and redeploying, there's no self-service `/register`.
+- **One Chromium at a time, for everyone** — a package-level lock serializes every user's Naukri actions, and each action launches a fresh headless browser, uses it, persists that user's session, and closes it again (rather than keeping one browser alive per user). This keeps RAM usage low enough for a Raspberry Pi 3B at the cost of a few seconds of cold-start latency per action; concurrent Telegram commands from different users queue rather than run in parallel, but Telegram itself stays responsive.
 
 ## License
 

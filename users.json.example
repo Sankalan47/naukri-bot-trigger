@@ -1,0 +1,13 @@
+[
+  {
+    "telegram_user_id": 111111111,
+    "naukri_email": "user-one@example.com",
+    "naukri_password": "user-one-password"
+  },
+  {
+    "telegram_user_id": 222222222,
+    "naukri_email": "user-two@example.com",
+    "naukri_password": "user-two-password",
+    "session_dir": "sessions/222222222"
+  }
+]

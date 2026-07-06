@@ -32,18 +32,19 @@ func main() {
 		log.Fatalf("creating telegram bot: %v", err)
 	}
 
-	naukriClient := naukri.NewClient(cfg.NaukriEmail, cfg.NaukriPassword)
-	if err := naukriClient.Start(); err != nil {
-		log.Fatalf("starting naukri client: %v", err)
+	sessions := make(map[int64]*naukri.Client, len(cfg.Users))
+	jobs := make([]scheduler.Job, 0, len(cfg.Users))
+	for _, u := range cfg.Users {
+		client := naukri.NewClient(u.NaukriEmail, u.NaukriPassword, u.SessionDir)
+		sessions[u.TelegramUserID] = client
+		jobs = append(jobs, scheduler.Job{ChatID: u.TelegramUserID, Touch: client.TouchBio})
 	}
-	log.Println("NaukriBot started")
+	log.Printf("NaukriBot started with %d user(s)", len(sessions))
 
-	bot := telegram.New(api, naukriClient, cfg.AllowedUserID)
+	bot := telegram.New(api, sessions)
 	go bot.Run()
 
-	go scheduler.Run(naukriClient.TouchBio, func(msg string) {
-		bot.Notify(cfg.AllowedUserID, msg)
-	})
+	go scheduler.Run(jobs, bot.Notify)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -51,8 +52,6 @@ func main() {
 
 	log.Println("Shutting down...")
 	bot.Stop()
-	if err := naukriClient.Stop(); err != nil {
-		log.Printf("error stopping naukri client: %v", err)
-	}
+	naukri.WaitIdle() // let any in-flight action finish persisting + close its browser
 	log.Println("NaukriBot shut down")
 }
