@@ -447,7 +447,13 @@ func (c *Client) openBioEditor() error {
 
 	if _, err := c.page.WaitForSelector(bioEditBtn, playwright.PageWaitForSelectorOptions{
 		State:   playwright.WaitForSelectorStateVisible,
-		Timeout: playwright.Float(10_000),
+		// #lazyProfileSummary only mounts once scrolled into view; on
+		// constrained ARM hardware (e.g. Raspberry Pi under xvfb-run) that can
+		// take longer than the 10s once used here, especially on longer
+		// profile pages where the widget sits further down. 25s gives that
+		// headroom without slowing down the common case, since the wait
+		// returns as soon as the element appears.
+		Timeout: playwright.Float(25_000),
 	}); err != nil {
 		c.takeDebugScreenshot()
 		return newSelectorError("Could not find bio edit button — Naukri UI may have changed")
