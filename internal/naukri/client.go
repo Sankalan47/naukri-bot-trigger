@@ -445,19 +445,29 @@ func (c *Client) openBioEditor() error {
 	// Best-effort scroll so the edit button is in view; failure is not fatal.
 	_ = c.page.Locator(bioSection).ScrollIntoViewIfNeeded()
 
-	if _, err := c.page.WaitForSelector(bioEditBtn, playwright.PageWaitForSelectorOptions{
-		State:   playwright.WaitForSelectorStateVisible,
-		// #lazyProfileSummary only mounts once scrolled into view; on
-		// constrained ARM hardware (e.g. Raspberry Pi under xvfb-run) that can
-		// take longer than the 10s once used here, especially on longer
-		// profile pages where the widget sits further down. 25s gives that
-		// headroom without slowing down the common case, since the wait
-		// returns as soon as the element appears.
-		Timeout: playwright.Float(25_000),
-	}); err != nil {
-		c.takeDebugScreenshot()
-		return newSelectorError("Could not find bio edit button — Naukri UI may have changed")
+	// #lazyProfileSummary only mounts once scrolled into view; on constrained
+	// ARM hardware (e.g. Raspberry Pi under xvfb-run) that can be too slow for
+	// ScrollIntoViewIfNeeded alone, especially on longer profile pages where
+	// the widget sits further down. Rather than waiting longer here, fail
+	// fast and fall back to the sidebar quick-link below, which triggers the
+	// mount directly instead of relying on scroll timing.
+	if c.waitForBioEditBtn(10_000) != nil {
+		// ScrollIntoViewIfNeeded still hasn't gotten the widget to mount —
+		// fall back to the sidebar "Quick links" nav, which triggers the
+		// page's own scroll-to-section and is a more reliable lazy-load
+		// trigger. Give it a shorter retry since a real click should mount
+		// the widget directly rather than relying on scroll timing.
+		if err := c.page.Click(bioQuickLink); err != nil {
+			c.takeDebugScreenshot()
+			return newSelectorError("Could not find bio edit button — Naukri UI may have changed")
+		}
+		c.page.WaitForTimeout(3_000)
+		if c.waitForBioEditBtn(10_000) != nil {
+			c.takeDebugScreenshot()
+			return newSelectorError("Could not find bio edit button — Naukri UI may have changed")
+		}
 	}
+
 	if err := c.page.Click(bioEditBtn); err != nil {
 		return fmt.Errorf("clicking bio edit button: %w", err)
 	}
@@ -470,6 +480,16 @@ func (c *Client) openBioEditor() error {
 		return newSelectorError("Bio input field did not appear")
 	}
 	return nil
+}
+
+// waitForBioEditBtn waits up to timeoutMs for the Profile summary edit button
+// to become visible.
+func (c *Client) waitForBioEditBtn(timeoutMs float64) error {
+	_, err := c.page.WaitForSelector(bioEditBtn, playwright.PageWaitForSelectorOptions{
+		State:   playwright.WaitForSelectorStateVisible,
+		Timeout: playwright.Float(timeoutMs),
+	})
+	return err
 }
 
 // AddSkill adds a skill to the skills section. Returns false if already present.

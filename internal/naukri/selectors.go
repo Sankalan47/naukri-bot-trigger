@@ -47,6 +47,13 @@ const (
 	bioEditBtn  = "//span[contains(@class,'widgetTitle') and contains(normalize-space(),'rofile summary')]/following-sibling::span[contains(@class,'edit') and contains(@class,'icon')]"
 	bioTextarea = "#profileSummaryTxt"
 	bioSaveBtn  = "//button[normalize-space()='Save']"
+
+	// bioQuickLink is the sidebar "Quick links" jump-nav entry for the Profile
+	// summary section. Clicking it forces the page's own scroll-to-section,
+	// which is a more reliable trigger for #lazyProfileSummary's lazy mount
+	// than ScrollIntoViewIfNeeded — used as a fallback when the plain scroll
+	// doesn't get bioEditBtn to appear in time (see openBioEditor).
+	bioQuickLink = "//div[contains(@class,'quickLink')]//li[contains(@class,'collection-item')][.//span[normalize-space()='Profile summary']]"
 )
 
 // Skills section.
