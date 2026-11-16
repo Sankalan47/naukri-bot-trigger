@@ -224,6 +224,8 @@ go build -o bin\naukri-bot.exe .\cmd\naukri-bot
 go build -o bin\save-session.exe .\cmd\save-session
 ```
 
+**Optional: install `make`.** Get [GNU Make for Windows (GnuWin32)](https://gnuwin32.sourceforge.net/packages/make.htm) and run the "Complete package, except sources" installer. Then add `C:\Program Files (x86)\GnuWin32\bin` to your `PATH` and open a new terminal. After that, `make test` works. Keep using the `go build` commands above to build: `make build` writes binaries without the `.exe` extension, and the `build-linux-*` targets use Unix-style `GOOS=...` syntax that PowerShell and cmd don't understand.
+
 ### 3. Install Chromium
 
 ```powershell
