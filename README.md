@@ -75,7 +75,7 @@ Each user's `auth_state.json`/`cookies.json` (gitignored) live under `sessions/<
 
 For a full clone-to-deploy walkthrough on Linux (64-bit and 32-bit) and Windows, see **[SETUP.md](SETUP.md)**.
 
-**Prerequisites:** Go 1.23+, one Naukri.com account per user, and a Telegram bot token from [@BotFather](https://t.me/botfather).
+**Prerequisites:** [Go 1.23+](https://go.dev/doc/install), one Naukri.com account per user, and a Telegram bot token from [@BotFather](https://t.me/botfather).
 
 ```bash
 git clone https://github.com/Sankalan47/naukri-bot-trigger.git

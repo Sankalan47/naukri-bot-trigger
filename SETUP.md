@@ -13,7 +13,7 @@ This guide covers the full path from `git clone` to a bot that survives reboots,
 1. **A Telegram bot token.** Message [@BotFather](https://t.me/botfather), run `/newbot`, and copy the token.
 2. **Each user's Telegram user ID.** Message [@userinfobot](https://t.me/userinfobot); it replies with your numeric ID.
 3. **A Naukri.com account per user.** Email + password login is recommended. If the account only uses Google sign-in, use the cookie-session flow in [step 4](#4-bootstrap-naukri-sessions).
-4. **Go 1.23 or newer** on the machine where you build. The target machine doesn't need Go if you cross-compile.
+4. **Go 1.23 or newer** on the machine where you build ([installation guide](https://go.dev/doc/install)). The target machine doesn't need Go if you cross-compile.
 
 ### Figure out which Linux section applies
 
@@ -87,7 +87,7 @@ Both files are gitignored. Never commit them.
 
 ### 2. Build
 
-**Option 1: build on the server.** Install Go on the server first, then:
+**Option 1: build on the server.** Install Go on the server first ([installation guide](https://go.dev/doc/install)), then:
 
 ```bash
 make build
@@ -215,7 +215,7 @@ Continue at [step 4](#4-bootstrap-naukri-sessions), then [step 5 (Linux)](#5-lin
 
 ### 2. Install Go and build
 
-1. Install Go from <https://go.dev/dl/> (the `windows-amd64.msi` installer), then open a **new** PowerShell window.
+1. Install Go by following the [official guide](https://go.dev/doc/install). Download the `windows-amd64.msi` installer from <https://go.dev/dl/>, then open a **new** PowerShell window.
 2. Build. `make` isn't available by default on Windows, so run the commands directly:
 
 ```powershell
