@@ -39,12 +39,13 @@ There's also a background job: `internal/scheduler` fires a trivial bio "touch" 
 ## Project structure
 
 ```
-naukri-bot/
+naukri-bot-trigger/
 ├── go.mod / go.sum
 ├── Makefile                          # build, build-linux-arm64, build-linux-arm, install-browsers, test, run, run-save-session
-├── .env                               # process-wide secrets (gitignored)
-├── users.json                         # per-user Naukri accounts (gitignored, see users.json.example)
+├── .env.example                       # template for .env (process-wide secrets, gitignored)
+├── users.json.example                 # template for users.json (per-user Naukri accounts, gitignored)
 ├── sessions/                          # per-user session files, one dir per Telegram user ID (gitignored)
+├── SETUP.md                           # clone-to-deploy guide for Linux (64/32-bit) and Windows
 ├── deploy/
 │   └── naukri-bot.service             # systemd unit
 ├── cmd/
@@ -57,10 +58,10 @@ naukri-bot/
     ├── naukri/
     │   ├── client.go                  # Client: Start/Stop/Login/CheckStatus/UpdateHeadline/UpdateBio/AddSkill/RemoveSkill
     │   ├── selectors.go                # Naukri DOM selectors (update when Naukri ships a new frontend)
-    │   ├── text.go                     # pure text helpers (e.g. bio-toggle logic)
+    │   ├── text.go / text_test.go      # pure text helpers (e.g. bio-toggle logic) + tests
     │   └── errors.go                   # Error type + ErrorKind enum (Auth/SessionExpired/Selector/Timeout)
     ├── scheduler/
-    │   └── scheduler.go                 # daily scheduled per-user bio-touch jobs
+    │   └── scheduler.go / scheduler_test.go  # daily scheduled per-user bio-touch jobs + tests
     └── telegram/
         ├── bot.go                       # update loop, per-user dispatch, lifecycle
         ├── handlers.go                  # /start, /status, /refresh_session, /cancel, conversation entry points
@@ -72,11 +73,13 @@ Each user's `auth_state.json`/`cookies.json` (gitignored) live under `sessions/<
 
 ## Getting started
 
+For a full clone-to-deploy walkthrough on Linux (64-bit and 32-bit) and Windows, see **[SETUP.md](SETUP.md)**.
+
 **Prerequisites:** Go 1.23+, one Naukri.com account per user, and a Telegram bot token from [@BotFather](https://t.me/botfather).
 
 ```bash
-git clone <this-repo>
-cd naukri-bot
+git clone https://github.com/Sankalan47/naukri-bot-trigger.git
+cd naukri-bot-trigger
 cp .env.example .env             # fill in TELEGRAM_BOT_TOKEN, see Configuration below
 cp users.json.example users.json # add one entry per Telegram user + their Naukri account
 make build
@@ -108,6 +111,7 @@ Process-wide environment variables, read via `internal/config/config.go`:
 | `USERS_FILE` | No | Path to the per-user roster (default `users.json`) |
 | `PLAYWRIGHT_NODEJS_PATH` / `CHROMIUM_PATH` | No | Point at apt-installed system Node/Chromium — needed on 32-bit ARM (e.g. Raspberry Pi 3B), where Playwright has no prebuilt binaries |
 | `HEADLESS` | No | Set to `false` to run a headed browser (see Deployment — required on Naukri due to bot detection on some setups) |
+| `NAUKRI_EMAIL` / `NAUKRI_PASSWORD` | No | Only read by the `save-session` dev tool, which drives a single account independent of `users.json` |
 
 See `.env.example` for the full template.
 
@@ -167,7 +171,7 @@ journalctl -u naukri-bot -f   # tail logs
 - **Sessions expire** after ~30 days; `/status` detects this early, `/refresh_session` explains how to renew.
 - **Selectors may break** if Naukri changes its frontend — all selectors live in `internal/naukri/selectors.go`; validate with `playwright codegen https://www.naukri.com/mnjuser/profile`.
 - **Manual onboarding only** — the bot only responds to Telegram users listed in `users.json`; adding someone requires editing that file and redeploying, there's no self-service `/register`.
-- **One Chromium at a time, for everyone** — a package-level lock serializes every user's Naukri actions, and each action launches a fresh headless browser, uses it, persists that user's session, and closes it again (rather than keeping one browser alive per user). This keeps RAM usage low enough for a Raspberry Pi 3B at the cost of a few seconds of cold-start latency per action; concurrent Telegram commands from different users queue rather than run in parallel, but Telegram itself stays responsive.
+- **One Chromium at a time, for everyone** — a package-level lock serializes every user's Naukri actions, and each action launches a fresh browser, uses it, persists that user's session, and closes it again (rather than keeping one browser alive per user). This keeps RAM usage low enough for a Raspberry Pi 3B at the cost of a few seconds of cold-start latency per action; concurrent Telegram commands from different users queue rather than run in parallel, but Telegram itself stays responsive.
 
 ## License
 
